@@ -2,7 +2,10 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { supabase, variaveisConfiguradas } from "@/lib/supabase";
-import { FUNCOES_PADRAO, type Funcionario } from "@/lib/tipos";
+import type { Funcionario } from "@/lib/tipos";
+import { FUNCOES } from "@/config/restaurante";
+
+const SETORES = Array.from(new Set(FUNCOES.map((f) => f.setor)));
 
 type Formulario = {
   id: string | null; // null = funcionário novo
@@ -14,7 +17,7 @@ type Formulario = {
 const FORMULARIO_VAZIO: Formulario = {
   id: null,
   nome: "",
-  funcao: FUNCOES_PADRAO[0],
+  funcao: FUNCOES[0].nome,
   telefone: "",
 };
 
@@ -58,11 +61,12 @@ export default function Equipe() {
     };
   }, [aplicarResultado]);
 
-  // Funções padrão + qualquer função que já exista no banco.
-  const funcoes = useMemo(() => {
-    const todas = new Set(FUNCOES_PADRAO);
-    funcionarios.forEach((f) => todas.add(f.funcao));
-    return Array.from(todas);
+  // Funções do restaurante (src/config/restaurante.ts) + outras que já estejam no banco.
+  const outrasFuncoes = useMemo(() => {
+    const doRestaurante = new Set(FUNCOES.map((f) => f.nome));
+    return Array.from(new Set(funcionarios.map((f) => f.funcao))).filter(
+      (f) => !doRestaurante.has(f),
+    );
   }, [funcionarios]);
 
   const semVariaveis = !variaveisConfiguradas();
@@ -159,11 +163,24 @@ export default function Equipe() {
               value={formulario.funcao}
               onChange={(e) => setFormulario({ ...formulario, funcao: e.target.value })}
             >
-              {funcoes.map((f) => (
-                <option key={f} value={f}>
-                  {f}
-                </option>
+              {SETORES.map((setor) => (
+                <optgroup key={setor} label={setor}>
+                  {FUNCOES.filter((f) => f.setor === setor).map((f) => (
+                    <option key={f.nome} value={f.nome}>
+                      {f.nome}
+                    </option>
+                  ))}
+                </optgroup>
               ))}
+              {outrasFuncoes.length > 0 && (
+                <optgroup label="Outras">
+                  {outrasFuncoes.map((f) => (
+                    <option key={f} value={f}>
+                      {f}
+                    </option>
+                  ))}
+                </optgroup>
+              )}
             </select>
           </label>
           <label className="block">

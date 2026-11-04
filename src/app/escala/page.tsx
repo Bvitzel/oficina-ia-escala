@@ -2,8 +2,16 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { supabase, variaveisConfiguradas } from "@/lib/supabase";
-import type { Configuracao, Escala, Funcionario, Regra, Turno } from "@/lib/tipos";
-import { chaveCelula, conferirSemana, lerConfiguracoes, type Alerta, type ConfigRegras } from "@/lib/regras";
+import type { Escala, Funcionario, Turno } from "@/lib/tipos";
+import {
+  chaveCelula,
+  conferirSemana,
+  formatarHora,
+  minutosLiquidos,
+  setorDaFuncao,
+  setorDoTurno,
+  type Alerta,
+} from "@/lib/regras";
 import {
   DIAS_SEMANA,
   diaMes,
@@ -23,7 +31,7 @@ export default function EscalaDaSemana() {
   const [turnos, setTurnos] = useState<Turno[]>([]);
   const [funcionarios, setFuncionarios] = useState<Funcionario[]>([]);
   const [escalas, setEscalas] = useState<Escala[]>([]);
-  const [config, setConfig] = useState<ConfigRegras | null>(null);
+  const [mostrarTodos, setMostrarTodos] = useState(false);
   const [verAlertas, setVerAlertas] = useState(false);
   const [carregando, setCarregando] = useState(true);
   const [erro, setErro] = useState<string | null>(null);
@@ -46,23 +54,17 @@ export default function EscalaDaSemana() {
     async function carregarBase() {
       if (!variaveisConfiguradas()) return;
       const db = supabase();
-      const [t, f, r, c] = await Promise.all([
+      const [t, f] = await Promise.all([
         db.from("turnos").select("id, nome, hora_inicio, hora_fim, ordem").order("ordem"),
         db.from("funcionarios").select("id, nome, funcao, telefone, cpf, ativo").order("nome"),
-        db.from("regras").select("id, dia_semana, turno_id, funcao, minimo"),
-        db.from("configuracoes").select("chave, valor"),
       ]);
-      const falha = t.error ?? f.error ?? r.error ?? c.error;
+      const falha = t.error ?? f.error;
       if (falha) {
         setErro(`Não foi possível carregar os dados: ${falha.message}`);
         return;
       }
       setTurnos(t.data as Turno[]);
       setFuncionarios(f.data as Funcionario[]);
-      setConfig({
-        minimos: r.data as Regra[],
-        ...lerConfiguracoes(c.data as Configuracao[]),
-      });
     }
     carregarBase();
   }, []);
@@ -93,10 +95,10 @@ export default function EscalaDaSemana() {
     [funcionarios],
   );
 
-  // Regras da casa: alertas recalculados a cada mudança na escala.
+  // Regras da casa (src/config/restaurante.ts): recalculadas a cada mudança.
   const alertas = useMemo<Alerta[]>(
-    () => (config ? conferirSemana({ dias, turnos, funcionarios, escalas, config }) : []),
-    [config, dias, turnos, funcionarios, escalas],
+    () => (turnos.length > 0 ? conferirSemana({ dias, turnos, funcionarios, escalas }) : []),
+    [dias, turnos, funcionarios, escalas],
   );
 
   // Avisos por célula e por funcionário dentro da célula.
@@ -167,16 +169,27 @@ export default function EscalaDaSemana() {
 
   // Na janela: ativos + quem já está escalado mesmo se desativado depois.
   const opcoesDaCelula = useMemo(() => {
-    if (!celula) return [];
+    if (!celula) return { setor: null, visiveis: [], escondidos: 0 };
     const escaladosIds = new Set(
       escalas
         .filter((e) => e.data === celula.data && e.turno_id === celula.turno.id)
         .map((e) => e.funcionario_id),
     );
-    return funcionarios
+    // Mostra quem é do setor do turno (e quem tem função sem setor cadastrado).
+    const setor = setorDoTurno(celula.turno);
+    const doSetor = (f: Funcionario) => {
+      const s = setorDaFuncao(f.funcao);
+      return setor === null || s === null || s === setor;
+    };
+    const lista = funcionarios
       .filter((f) => f.ativo || escaladosIds.has(f.id))
       .map((f) => ({ funcionario: f, marcado: escaladosIds.has(f.id) }));
-  }, [celula, escalas, funcionarios]);
+    return {
+      setor,
+      visiveis: lista.filter((o) => mostrarTodos || o.marcado || doSetor(o.funcionario)),
+      escondidos: lista.filter((o) => !o.marcado && !doSetor(o.funcionario)).length,
+    };
+  }, [celula, escalas, funcionarios, mostrarTodos]);
 
   return (
     <div className="space-y-4">
@@ -211,7 +224,7 @@ export default function EscalaDaSemana() {
       )}
       {erro && <p className="cartao border-red-300 text-red-700">{erro}</p>}
 
-      {config && !carregando && (
+      {turnos.length > 0 && !carregando && (
         <div className={`cartao ${alertas.length > 0 ? "border-red-300 bg-red-50" : "border-green-300 bg-green-50"}`}>
           {alertas.length === 0 ? (
             <p className="font-semibold text-green-800">Nenhum alerta nesta semana ✓</p>
@@ -271,6 +284,9 @@ export default function EscalaDaSemana() {
                   <span className="block text-xs font-normal text-neutral-600">
                     {horaCurta(t.hora_inicio)}–{horaCurta(t.hora_fim)}
                   </span>
+                  <span className="block text-xs font-normal text-neutral-500">
+                    {formatarHora(minutosLiquidos(t))} de trabalho
+                  </span>
                 </th>
                 {dias.map((d) => {
                   const escalados = escaladosNa(d, t.id);
@@ -284,7 +300,10 @@ export default function EscalaDaSemana() {
                             ? "border-red-400 bg-red-50 active:bg-red-100"
                             : "border-dashed border-neutral-300 active:bg-neutral-100"
                         }`}
-                        onClick={() => setCelula({ data: d, turno: t })}
+                        onClick={() => {
+                          setMostrarTodos(false);
+                          setCelula({ data: d, turno: t });
+                        }}
                         aria-label={`${t.nome} de ${rotuloDia(d)}: escolher funcionários`}
                       >
                         {escalados.length === 0 && (
@@ -309,11 +328,16 @@ export default function EscalaDaSemana() {
                             </span>
                           );
                         })}
-                        {avisosCelula.get(chave)?.map((aviso) => (
+                        {(avisosCelula.get(chave) ?? []).slice(0, 2).map((aviso) => (
                           <span key={aviso} className="text-xs font-semibold text-red-700">
                             ⚠ {aviso}
                           </span>
                         ))}
+                        {(avisosCelula.get(chave)?.length ?? 0) > 2 && (
+                          <span className="text-xs font-semibold text-red-700">
+                            +{avisosCelula.get(chave)!.length - 2} faltas
+                          </span>
+                        )}
                       </button>
                     </td>
                   );
@@ -340,7 +364,8 @@ export default function EscalaDaSemana() {
               {diaMes(celula.data)}
             </h2>
             <p className="mb-3 text-sm text-neutral-600">
-              Marque quem trabalha. Cada mudança é salva na hora.
+              Marque quem trabalha{opcoesDaCelula.setor ? ` (${opcoesDaCelula.setor})` : ""}. Cada
+              mudança é salva na hora.
             </p>
             {erro && <p className="mb-3 text-red-700">{erro}</p>}
             {(() => {
@@ -356,7 +381,7 @@ export default function EscalaDaSemana() {
               );
             })()}
             <ul className="space-y-2">
-              {opcoesDaCelula.map(({ funcionario: f, marcado }) => (
+              {opcoesDaCelula.visiveis.map(({ funcionario: f, marcado }) => (
                 <li key={f.id}>
                   <label
                     className={`flex cursor-pointer items-center gap-3 rounded-xl border p-3 ${
@@ -384,6 +409,14 @@ export default function EscalaDaSemana() {
                 </li>
               ))}
             </ul>
+            {opcoesDaCelula.escondidos > 0 && (
+              <button
+                className="botao-secundario mt-3 w-full"
+                onClick={() => setMostrarTodos(true)}
+              >
+                Mostrar outros setores ({opcoesDaCelula.escondidos})
+              </button>
+            )}
             <button className="botao mt-4 w-full" onClick={() => setCelula(null)}>
               Pronto
             </button>
