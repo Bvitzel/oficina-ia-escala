@@ -2,7 +2,8 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { supabase, variaveisConfiguradas } from "@/lib/supabase";
-import type { Escala, Funcionario, Turno } from "@/lib/tipos";
+import type { Configuracao, Escala, Funcionario, Regra, Turno } from "@/lib/tipos";
+import { chaveCelula, conferirSemana, lerConfiguracoes, type Alerta, type ConfigRegras } from "@/lib/regras";
 import {
   DIAS_SEMANA,
   diaMes,
@@ -22,6 +23,8 @@ export default function EscalaDaSemana() {
   const [turnos, setTurnos] = useState<Turno[]>([]);
   const [funcionarios, setFuncionarios] = useState<Funcionario[]>([]);
   const [escalas, setEscalas] = useState<Escala[]>([]);
+  const [config, setConfig] = useState<ConfigRegras | null>(null);
+  const [verAlertas, setVerAlertas] = useState(false);
   const [carregando, setCarregando] = useState(true);
   const [erro, setErro] = useState<string | null>(null);
   const [celula, setCelula] = useState<CelulaAberta | null>(null);
@@ -43,29 +46,37 @@ export default function EscalaDaSemana() {
     async function carregarBase() {
       if (!variaveisConfiguradas()) return;
       const db = supabase();
-      const [t, f] = await Promise.all([
+      const [t, f, r, c] = await Promise.all([
         db.from("turnos").select("id, nome, hora_inicio, hora_fim, ordem").order("ordem"),
         db.from("funcionarios").select("id, nome, funcao, telefone, cpf, ativo").order("nome"),
+        db.from("regras").select("id, dia_semana, turno_id, funcao, minimo"),
+        db.from("configuracoes").select("chave, valor"),
       ]);
-      if (t.error || f.error) {
-        setErro(`Não foi possível carregar os dados: ${(t.error ?? f.error)?.message}`);
+      const falha = t.error ?? f.error ?? r.error ?? c.error;
+      if (falha) {
+        setErro(`Não foi possível carregar os dados: ${falha.message}`);
         return;
       }
       setTurnos(t.data as Turno[]);
       setFuncionarios(f.data as Funcionario[]);
+      setConfig({
+        minimos: r.data as Regra[],
+        ...lerConfiguracoes(c.data as Configuracao[]),
+      });
     }
     carregarBase();
   }, []);
 
   // Escala da semana: recarregada a cada troca de semana.
+  // Inclui o domingo anterior e a segunda seguinte para a regra de fechar e abrir.
   useEffect(() => {
     if (!variaveisConfiguradas()) return;
     let cancelado = false;
     supabase()
       .from("escalas")
       .select("id, data, turno_id, funcionario_id")
-      .gte("data", segunda)
-      .lte("data", somarDias(segunda, 6))
+      .gte("data", somarDias(segunda, -1))
+      .lte("data", somarDias(segunda, 7))
       .then(({ data, error }) => {
         if (cancelado) return;
         if (error) setErro(`Não foi possível carregar a escala: ${error.message}`);
@@ -81,6 +92,39 @@ export default function EscalaDaSemana() {
     () => new Map(funcionarios.map((f) => [f.id, f])),
     [funcionarios],
   );
+
+  // Regras da casa: alertas recalculados a cada mudança na escala.
+  const alertas = useMemo<Alerta[]>(
+    () => (config ? conferirSemana({ dias, turnos, funcionarios, escalas, config }) : []),
+    [config, dias, turnos, funcionarios, escalas],
+  );
+
+  // Avisos por célula e por funcionário dentro da célula.
+  const { avisosCelula, avisosPessoa } = useMemo(() => {
+    const avisosCelula = new Map<string, string[]>();
+    const avisosPessoa = new Map<string, string[]>();
+    for (const a of alertas) {
+      for (const c of a.celulas) {
+        if (a.funcionarioId) {
+          const chave = `${c}|${a.funcionarioId}`;
+          const lista = avisosPessoa.get(chave) ?? [];
+          if (!lista.includes(a.curto)) lista.push(a.curto);
+          avisosPessoa.set(chave, lista);
+        } else {
+          avisosCelula.set(c, [...(avisosCelula.get(c) ?? []), a.curto]);
+        }
+      }
+    }
+    return { avisosCelula, avisosPessoa };
+  }, [alertas]);
+
+  function celulaTemAlerta(data: string, turnoId: string): boolean {
+    const c = chaveCelula(data, turnoId);
+    if (avisosCelula.has(c)) return true;
+    return escalas.some(
+      (e) => e.data === data && e.turno_id === turnoId && avisosPessoa.has(`${c}|${e.funcionario_id}`),
+    );
+  }
 
   function escaladosNa(data: string, turnoId: string): Funcionario[] {
     return escalas
@@ -167,6 +211,34 @@ export default function EscalaDaSemana() {
       )}
       {erro && <p className="cartao border-red-300 text-red-700">{erro}</p>}
 
+      {config && !carregando && (
+        <div className={`cartao ${alertas.length > 0 ? "border-red-300 bg-red-50" : "border-green-300 bg-green-50"}`}>
+          {alertas.length === 0 ? (
+            <p className="font-semibold text-green-800">Nenhum alerta nesta semana ✓</p>
+          ) : (
+            <>
+              <button
+                className="flex w-full items-center justify-between gap-2 text-left font-semibold text-red-800"
+                onClick={() => setVerAlertas(!verAlertas)}
+                aria-expanded={verAlertas}
+              >
+                <span>
+                  ⚠ Esta semana tem {alertas.length} {alertas.length === 1 ? "alerta" : "alertas"}
+                </span>
+                <span className="text-sm underline">{verAlertas ? "Esconder" : "Ver lista"}</span>
+              </button>
+              {verAlertas && (
+                <ul className="mt-3 list-disc space-y-1 pl-5 text-sm text-red-900">
+                  {alertas.map((a, i) => (
+                    <li key={i}>{a.texto}</li>
+                  ))}
+                </ul>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
       <p className="text-sm text-neutral-600">
         Toque em uma célula para escolher quem trabalha. Arraste a grade para o lado para ver
         todos os dias.
@@ -202,25 +274,46 @@ export default function EscalaDaSemana() {
                 </th>
                 {dias.map((d) => {
                   const escalados = escaladosNa(d, t.id);
+                  const chave = chaveCelula(d, t.id);
+                  const comAlerta = celulaTemAlerta(d, t.id);
                   return (
                     <td key={d} className="border-b border-neutral-200 p-1 align-top">
                       <button
-                        className="flex min-h-24 w-full flex-col items-stretch gap-1 rounded-xl border border-dashed border-neutral-300 p-2 text-left active:bg-neutral-100"
+                        className={`flex min-h-24 w-full flex-col items-stretch gap-1 rounded-xl border p-2 text-left ${
+                          comAlerta
+                            ? "border-red-400 bg-red-50 active:bg-red-100"
+                            : "border-dashed border-neutral-300 active:bg-neutral-100"
+                        }`}
                         onClick={() => setCelula({ data: d, turno: t })}
                         aria-label={`${t.nome} de ${rotuloDia(d)}: escolher funcionários`}
                       >
-                        {escalados.length === 0 ? (
+                        {escalados.length === 0 && (
                           <span className="m-auto text-sm text-neutral-400">+ Escalar</span>
-                        ) : (
-                          escalados.map((f) => (
+                        )}
+                        {escalados.map((f) => {
+                          const avisos = avisosPessoa.get(`${chave}|${f.id}`);
+                          return (
                             <span
                               key={f.id}
-                              className="truncate rounded-lg bg-neutral-100 px-2 py-1 text-sm font-medium"
+                              className={`rounded-lg px-2 py-1 text-sm font-medium ${
+                                avisos ? "bg-red-100 text-red-800" : "bg-neutral-100"
+                              }`}
                             >
-                              {f.nome.split(" ")[0]}
+                              <span className="block truncate">
+                                {avisos && "⚠ "}
+                                {f.nome.split(" ")[0]}
+                              </span>
+                              {avisos && (
+                                <span className="block text-xs font-normal">{avisos.join(", ")}</span>
+                              )}
                             </span>
-                          ))
-                        )}
+                          );
+                        })}
+                        {avisosCelula.get(chave)?.map((aviso) => (
+                          <span key={aviso} className="text-xs font-semibold text-red-700">
+                            ⚠ {aviso}
+                          </span>
+                        ))}
                       </button>
                     </td>
                   );
@@ -250,6 +343,18 @@ export default function EscalaDaSemana() {
               Marque quem trabalha. Cada mudança é salva na hora.
             </p>
             {erro && <p className="mb-3 text-red-700">{erro}</p>}
+            {(() => {
+              const chave = chaveCelula(celula.data, celula.turno.id);
+              const daCelula = alertas.filter((a) => a.celulas.includes(chave));
+              if (daCelula.length === 0) return null;
+              return (
+                <ul className="mb-3 space-y-1 rounded-xl border border-red-300 bg-red-50 p-3 text-sm text-red-900">
+                  {daCelula.map((a, i) => (
+                    <li key={i}>⚠ {a.texto}</li>
+                  ))}
+                </ul>
+              );
+            })()}
             <ul className="space-y-2">
               {opcoesDaCelula.map(({ funcionario: f, marcado }) => (
                 <li key={f.id}>
